@@ -1,11 +1,113 @@
 import json
 import sys
+import os
 import hashlib
 import requests
 import urllib.parse
 import socket
+import struct
+import math
+def combine_pieces(output_filename, num_pieces):
+    # Open the output file in binary write mode
+    with open(output_filename, 'wb') as outfile:
+        # Loop through each piece file and append its contents to the output file
+        for i in range(num_pieces):
+            piece_filename = "/$"+str(i)  # Each piece is numbered as '0', '1', '2', ...
+            with open(piece_filename, 'rb') as piece_file:
+                outfile.write(piece_file.read())
+    print(f"Combined all {num_pieces} pieces into {output_filename}.")
 
-def perform_handshake(peer_ip, peer_port, infohash, peer_id):
+def receive_message(s):
+    length = s.recv(4)
+    while not length or not int.from_bytes(length):
+        length = s.recv(4)
+    message = s.recv(int.from_bytes(length))
+    # If we didn't receive the full message for some reason, keep gobbling.
+    while len(message) < int.from_bytes(length):
+        message += s.recv(int.from_bytes(length) - len(message))
+    return length + message
+
+def downloaf(pieceIndex,decoded_data,sock,output_file):
+            pieceIndex=int(pieceIndex)
+            pieces_Array=[]
+            while True:
+                
+                # First, receive the length of the incoming message (4 bytes)
+                msg_length_data = sock.recv(4)
+                if len(msg_length_data) < 4:
+                    raise ValueError("Failed to receive message length")
+
+                # Convert the length prefix from bytes to an integer
+                msg_length = int.from_bytes(msg_length_data, byteorder='big')
+
+                # Now, receive the rest of the message based on the length prefix
+                message = sock.recv(msg_length)
+                if len(message) < msg_length:
+                    raise ValueError("Incomplete message received")
+
+                # Extract the message ID (the first byte of the message)
+                message_id = message[0]
+                print("abcd",message,"abcd",message_id)
+                # Check if the message is a bitfield message (ID = 5)
+                if message_id == 5:
+                    # The rest of the message is the bitfield
+                    bitfield = message[1:]  # Everything after the message ID is the bitfield
+                    print("Bitfield received:", bitfield)
+                    interested_message = b'\x00\x00\x00\x01' + b'\x02'
+                    sock.sendall(interested_message)
+                elif message_id==1:
+                    numberOfPieces=0
+                    for i in range(0, len(decoded_data["info"]["pieces"]), 20):
+                        numberOfPieces+=1
+                    defaultLength=decoded_data["info"]["piece length"]
+                    fileLength=decoded_data["info"]["length"]
+                    print("filelength",fileLength)
+                    print("piecelength",defaultLength)
+                    print("number of pieces",numberOfPieces)
+
+                    explen=defaultLength
+                    if(pieceIndex==numberOfPieces-1):
+                        explen=fileLength-pieceIndex*defaultLength
+                        print(explen)
+                        print("overflow")
+                    numberOfI=math.ceil(explen/16/1024)
+                    print("numberOfI",numberOfI)
+                    l=0
+                    data = bytearray()
+                    while numberOfI >0:
+                        print(numberOfI)
+                        begin = 2**14 * l
+                        block_length = min(explen - begin, 2**14)
+                        print(block_length)
+                        request_payload = struct.pack(">IBIII", 13, 6, pieceIndex, begin, block_length)
+                        numberOfI=numberOfI-1
+                        sock.sendall(request_payload)
+                        l=l+1
+                        print(numberOfI)
+                        message=receive_message(sock)
+                        data.extend(message[13:])
+
+                        # Convert the length prefix from bytes to an integer
+    
+
+                    with open(output_file, "wb") as f:
+                        print("niii")
+                        f.write(data)
+                        return 0
+
+
+
+                elif message_id==7:
+                    pieces_Array.append(message)
+                    print(pieces_Array)
+    
+
+        # Send the 'interested' message to the pee
+                    # Optionally, you can process the bitfield to see which pieces the peer has
+                else:
+                    print(f"Received message with ID {message_id}, not a bitfield")
+def perform_handshake(peer_ip, peer_port, infohash, peer_id,output_file,inde,flag,decoded_data={}):
+    print("info",infohash)
     try:
         # Ensure peer_id is bytes
         peer_id = peer_id.encode()
@@ -20,24 +122,30 @@ def perform_handshake(peer_ip, peer_port, infohash, peer_id):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             # Connect to the peer
             sock.connect((peer_ip, int(peer_port)))
-            
+
             # Send the handshake
             sock.sendall(handshake_msg)
-            
+
             # Receive the handshake response
             response = sock.recv(68)  # The handshake message is 68 bytes long
             
-            # Extract the peer ID from the response
             if len(response) < 68:
                 raise ValueError("Invalid handshake response length")
-            
+
+            # Extract the peer ID from the response
             received_peer_id = response[-20:]
-            
+
             # Print the hexadecimal representation of the received peer ID
             print("Peer ID:", received_peer_id.hex())
-    
+            if flag:
+                downloaf(inde,decoded_data,sock,output_file)
+            return sock
+
+            # Now wait for the bitfield message
     except Exception as e:
         print(f"An error occurred: {e}")
+    
+
 
 
 
@@ -177,7 +285,105 @@ def main():
         peer_ip = sys.argv[3].split(':')[0]
         peer_port = sys.argv[3].split(':')[-1]
         info_hash = hashlib.sha1(encode_bencode(decoded_data["info"])).digest()
-        perform_handshake(peer_ip, peer_port, info_hash, "00112233445566778899")
+        perform_handshake(peer_ip, peer_port, info_hash, "00112233445566778899","","",0)
+    elif command=='download_piece':
+        print(sys.argv)
+        with open(sys.argv[4], "rb") as file:
+            bencoded_value = file.read()
+        def bytes_to_str(data):
+            if isinstance(data, bytes):
+                try:
+                    return data.decode()
+                except UnicodeDecodeError:
+                    return repr(data)
+            raise TypeError(f"Type not serializable: {type(data)}")
+        decoded_data = decode_bencode(bencoded_value)
+        url=decoded_data['announce'].decode()
+        info_hash=hashlib.sha1(encode_bencode(decoded_data["info"])).digest()
+        peerid="12345678912345678912"
+        port=6881
+        uploaded=0
+        downloaded=0
+        left=decoded_data["info"]["length"]
+        compact=1
+        dic={
+        "info_hash": info_hash,
+        "peer_id": peerid,
+        "port": port,
+        "uploaded": uploaded,
+        "downloaded": downloaded,
+        "left": left,
+        "compact": compact
+    }
+        response=requests.get(url,params=dic)
+        red=decode_bencode(response.content)
+        # print(red)
+        peers_compact = red["peers"]
+        sh=None
+        for i in range(0, len(peers_compact), 6):
+            ip = ".".join(str(b) for b in peers_compact[i:i+4])
+            port = int.from_bytes(peers_compact[i+4:i+6], "big")
+            info_hash = hashlib.sha1(encode_bencode(decoded_data["info"])).digest()
+            sh=perform_handshake(ip,port,info_hash,"00112233445566778899",sys.argv[3],sys.argv[5],1,decoded_data)
+            break
+        # print(sh)
+        # downloaf(0,decoded_data,sh)
+        # peer_ip = sys.argv[3].split(':')[0]
+        # peer_port = sys.argv[3].split(':')[-1]
+        # info_hash = hashlib.sha1(encode_bencode(decoded_data["info"])).digest()
+        # perform_handshake(peer_ip, peer_port, info_hash, "00112233445566778899")
+    elif command=='download':
+        print(sys.argv)
+        with open(sys.argv[4], "rb") as file:
+            bencoded_value = file.read()
+        def bytes_to_str(data):
+            if isinstance(data, bytes):
+                try:
+                    return data.decode()
+                except UnicodeDecodeError:
+                    return repr(data)
+            raise TypeError(f"Type not serializable: {type(data)}")
+        decoded_data = decode_bencode(bencoded_value)
+        url=decoded_data['announce'].decode()
+        info_hash=hashlib.sha1(encode_bencode(decoded_data["info"])).digest()
+        peerid="12345678912345678912"
+        port=6881
+        uploaded=0
+        downloaded=0
+        left=decoded_data["info"]["length"]
+        compact=1
+        dic={
+        "info_hash": info_hash,
+        "peer_id": peerid,
+        "port": port,
+        "uploaded": uploaded,
+        "downloaded": downloaded,
+        "left": left,
+        "compact": compact
+    }
+        response=requests.get(url,params=dic)
+        red=decode_bencode(response.content)
+        # print(red)
+        peers_compact = red["peers"]
+        sh=None
+        arr=[]
+        for i in range(0, len(peers_compact), 6):
+            ip = ".".join(str(b) for b in peers_compact[i:i+4])
+            port = int.from_bytes(peers_compact[i+4:i+6], "big")
+            arr.append([ip,port])
+            numberOfPieces=0
+        for i in range(0, len(decoded_data["info"]["pieces"]), 20):
+            numberOfPieces+=1
+        info_hash = hashlib.sha1(encode_bencode(decoded_data["info"])).digest()
+
+        for i in range(0,numberOfPieces):
+            perform_handshake(arr[i%len(arr)][0],arr[i%len(arr)][1],info_hash,"00112233445566778899",f"/${i}",i,1,decoded_data)
+        files = os.listdir('/')
+        print(files)
+        combine_pieces(sys.argv[3],numberOfPieces)
+
+    
+
 
         
 
