@@ -88,8 +88,18 @@ class PeerConnection:
         self._send(MSG_INTERESTED)
         self._wait_for(MSG_UNCHOKE)
 
-    def download_piece(self, index: int, length: int, expected_hash: bytes) -> bytes:
-        """Download and verify a single piece, using a pipelined request window."""
+    def download_piece(
+        self,
+        index: int,
+        length: int,
+        expected_hash: bytes,
+        pipeline_depth: int = PIPELINE_DEPTH,
+    ) -> bytes:
+        """Download and verify a single piece, using a pipelined request window.
+
+        ``pipeline_depth`` is the number of block requests kept in flight; a
+        depth of 1 reproduces the slow serial request-wait-request behaviour.
+        """
         blocks = [
             (begin, min(BLOCK_SIZE, length - begin))
             for begin in range(0, length, BLOCK_SIZE)
@@ -101,7 +111,7 @@ class PeerConnection:
 
         while received < len(blocks):
             # Keep the request window full.
-            while outstanding < PIPELINE_DEPTH and next_request < len(blocks):
+            while outstanding < pipeline_depth and next_request < len(blocks):
                 begin, block_len = blocks[next_request]
                 self._send(MSG_REQUEST, struct.pack(">III", index, begin, block_len))
                 next_request += 1
