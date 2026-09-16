@@ -1,131 +1,63 @@
-# PyTorrent — a BitTorrent client from scratch
+# NewTorrent — a small BitTorrent v1 client in Python
 
-A working command-line **BitTorrent client written in pure Python**, with no
-torrent libraries. It implements the protocol end to end: a bencode codec, the
-HTTP tracker protocol, peer-wire handshakes and messaging, SHA-1 piece
-verification, **pipelined block requests**, and **concurrent multi-peer
-downloads**.
+An educational, command-line **single-file BitTorrent downloader** built without a torrent-client library. It parses bencoded metainfo, discovers peers through HTTP trackers, speaks the TCP peer-wire protocol, pipelines block requests, downloads pieces across multiple peers, and checks every assembled piece against its SHA-1 hash before publishing a completed file.
 
-![Python](https://img.shields.io/badge/python-3.8%2B-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
+**Status:** learning project, not a general-purpose or security-hardened torrent client. It does not seed, resume interrupted transfers, or support magnet links, DHT, UDP trackers, IPv6, multi-file torrents, or BitTorrent v2. It supports compact IPv4 tracker responses; it does not yet support the expanded peer-list format. These are intentional scope boundaries, not claims of full protocol compliance.
 
-```console
-$ python -m app.main download -o ubuntu.iso ubuntu.torrent
-Downloaded ubuntu.torrent to ubuntu.iso.
+## Quickstart
+
+Python **3.10+** and `requests` are required. Run from the repository root:
+
+```sh
+python -m pip install -r requirements.txt
+python -m app.main info sample.torrent         # offline: inspect bundled metainfo
+python -m app.main decode 'd3:foo3:bare'      # offline: decode a bencoded value
+python -m unittest discover -s tests -v      # offline: deterministic regression suite
 ```
 
-## Features
+A tracker and reachable peers are required for the network commands below. Use a `.torrent` file for content you are authorized to download; `sample.torrent` is a metainfo fixture and does not guarantee a reachable swarm.
 
-- **Bencode codec** — encode/decode of the serialization format used by
-  `.torrent` files and tracker responses, with deterministic key ordering so
-  the `info` hash is reproducible.
-- **Tracker protocol** — announces to the HTTP tracker and parses the compact
-  peer list.
-- **Peer-wire protocol** — performs the 68-byte handshake and exchanges
-  `bitfield` / `interested` / `unchoke` / `request` / `piece` messages.
-- **SHA-1 piece verification** — every downloaded piece is checked against the
-  digest in the metainfo before it is written; a mismatch is rejected.
-- **Request pipelining** — keeps several 16 KiB block requests in flight per
-  peer instead of a slow request-wait-request loop, keeping the TCP pipe full.
-- **Concurrent multi-peer downloads** — distributes pieces across peers using a
-  thread pool and a shared work queue, with a sequential fallback so the result
-  is always complete and correct.
+```sh
+python -m app.main peers path/to/file.torrent
+python -m app.main handshake path/to/file.torrent 203.0.113.1:6881
+python -m app.main download_piece -o piece-0.bin path/to/file.torrent 0
+python -m app.main download -o downloaded.bin path/to/file.torrent
+```
 
-## Architecture
+The handshake address above is a documentation-only example, **not** a live peer. `download` writes to a temporary file in the output directory and replaces the target only after all pieces have been verified. A successful download **will overwrite** an existing file at that target path; an unsuccessful download leaves it unchanged. Provide a writable output directory with enough space for the complete file.
 
-The client is split into focused modules under [`app/`](app/):
+## What was implemented
 
-| Module | Responsibility |
+| Component | Responsibility |
 | --- | --- |
-| [`bencode.py`](app/bencode.py) | Bencode encode/decode codec |
-| [`torrent.py`](app/torrent.py) | Parse `.torrent` files; derive info hash, piece hashes and sizes |
-| [`tracker.py`](app/tracker.py) | Announce to the tracker and discover peers |
-| [`peer.py`](app/peer.py) | Peer-wire connection: handshake, messaging, pipelined + verified piece download |
-| [`download.py`](app/download.py) | Single-piece and concurrent whole-file orchestration |
-| [`main.py`](app/main.py) | Command-line interface |
+| [`app/bencode.py`](app/bencode.py) | Binary-safe bencode encoding/decoding and malformed-input checks |
+| [`app/torrent.py`](app/torrent.py) | Single-file v1 metainfo and piece-layout validation; SHA-1 info hash |
+| [`app/tracker.py`](app/tracker.py) | HTTP announce and compact IPv4 peer-list parsing |
+| [`app/peer.py`](app/peer.py) | Validated handshake, bounded peer-wire framing, pipelined block requests and piece hash verification |
+| [`app/download.py`](app/download.py) | Multi-peer work queue, fallback retries, and publish-on-success file output |
+| [`app/main.py`](app/main.py) | CLI commands and argument validation |
+| [`benchmark.py`](benchmark.py) | Optional live-network comparison of a serial baseline and the concurrent downloader |
+| [`tests/test_client.py`](tests/test_client.py) | Offline protocol, parsing, malformed-response, CLI, and output-preservation regression tests |
 
-## Installation
+The downloader splits each piece into blocks of at most 16 KiB and keeps a limited number of requests in flight. It checks the returned piece index, block offset, and exact requested byte count before incorporating each response. A verified piece can be written to its destination offset; unfinished pieces are retried against available peers. The output is only moved into place after all pieces have been obtained.
 
-Requires Python 3.8+. The only third-party dependency is
-[`requests`](https://pypi.org/project/requests/).
+## Verification and benchmarking
 
-```bash
-git clone https://github.com/omarsaqr12/NewTorrent.git
-cd NewTorrent
-pip install -r requirements.txt
+The offline suite uses simulated socket replies and peer connections: it tests good and malformed handshakes, out-of-order blocks, invalid response sizes and offsets, SHA-1 mismatches, malformed metainfo, and preservation of an existing output on failure. Run `python -m unittest discover -s tests -v`. [CI workflow](.github/workflows/tests.yml) runs the same suite on Python 3.12. **Offline tests do not establish success against arbitrary live trackers or peers.**
+
+For an optional, network-dependent comparison:
+
+```sh
+python benchmark.py path/to/file.torrent 5
 ```
 
-## Usage
+The benchmark contrasts one peer downloading serially with the concurrent/pipelined implementation. Peer availability, network conditions, and differing concurrency mean that results are specific to each run; this is **not** an isolated measurement of pipelining alone. An earlier version of the README reported an approximately 1.7× median speedup on a small sample, but the underlying raw measurements and environment were not retained here, and that result has **not** been independently reproduced for this revision. No general performance improvement is claimed.
 
-```bash
-# Decode a bencoded value
-python -m app.main decode "d3:foo3:bar5:helloi52ee"
+## Protocol scope and references
 
-# Inspect a torrent's metadata (tracker, length, info hash, piece hashes)
-python -m app.main info sample.torrent
+This project originated in the [CodeCrafters Build Your Own BitTorrent challenge](https://app.codecrafters.io/courses/bittorrent/overview); the implementation and its limits are described here rather than claiming completion of all challenge stages. The relevant protocol references are [BEP 3 (BitTorrent v1)](https://www.bittorrent.org/beps/bep_0003.html) and [BEP 23 (compact tracker peers)](https://www.bittorrent.org/beps/bep_0023.html). In particular, a bitfield is optional, and `compact=1` does not require a tracker to return compact peers; this client explicitly rejects unsupported expanded lists.
 
-# Discover peers from the tracker
-python -m app.main peers sample.torrent
-
-# Handshake with a specific peer
-python -m app.main handshake sample.torrent 165.232.38.164:51433
-
-# Download a single (verified) piece
-python -m app.main download_piece -o piece-0.bin sample.torrent 0
-
-# Download the whole file concurrently across peers
-python -m app.main download -o output.bin sample.torrent
-```
-
-A `sample.torrent` is included for a quick end-to-end try.
-
-## How it works
-
-**Pipelining.** A piece is split into 16 KiB blocks. Rather than sending one
-`request`, waiting for the `piece` reply, then sending the next, the client
-keeps a window of several requests outstanding (see `PIPELINE_DEPTH` in
-[`peer.py`](app/peer.py)). The peer can stream replies back-to-back, which is
-the main reason this is far faster than a naive serial implementation.
-
-**Concurrency.** [`download.py`](app/download.py) loads every piece index into a
-thread-safe queue and starts one worker thread per peer. Each worker pulls
-indices, downloads and verifies them, and writes each verified piece directly to
-its byte offset in the pre-allocated output file under a lock. If a peer drops a
-piece, it is requeued and a final sequential pass guarantees completeness.
-
-**Integrity.** Each assembled piece is hashed with SHA-1 and compared to the
-expected digest from the torrent's `info["pieces"]`; only matching pieces are
-accepted.
-
-## Benchmark
-
-[`benchmark.py`](benchmark.py) compares the optimized download (concurrent,
-pipelined, multi-peer) against a naive baseline (a single peer, one block
-request in flight at a time, pieces fetched in sequence) over several live runs:
-
-```bash
-python benchmark.py sample.torrent 11
-```
-
-On the bundled `sample.torrent` (92 KB, 3 pieces) the optimized client is about
-**1.7× faster (median), up to ~1.9× best case**. The gap is bounded here by the
-tiny file: with only three pieces, TCP/handshake round-trips dominate and there
-is little payload for pipelining and concurrency to accelerate. The speedup
-widens on larger torrents with more pieces and peers, where transfer time —
-rather than connection setup — is the bottleneck. (Results vary with network
-conditions and the peers the tracker returns.)
-
-## Scope and limitations
-
-This is a learning-focused client. It supports single-file torrents over HTTP
-trackers and is download-only (it does not seed). It does not implement UDP
-trackers, the DHT, magnet links, or multi-file torrents.
-
-## Acknowledgements
-
-Built by implementing the protocol from scratch as part of the
-[CodeCrafters "Build Your Own BitTorrent"](https://app.codecrafters.io/courses/bittorrent/overview)
-challenge.
+The client has no resume state, piece-availability-aware scheduling, peer penalties, encrypted peer connections, or protection against every possible hostile-network behavior. Live tracker interoperability and throughput should be tested separately before relying on it for anything beyond learning and experimentation.
 
 ## License
 
