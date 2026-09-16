@@ -1,14 +1,4 @@
-"""Command-line interface for the BitTorrent client.
-
-Usage::
-
-    python -m app.main decode <bencoded-string>
-    python -m app.main info <file.torrent>
-    python -m app.main peers <file.torrent>
-    python -m app.main handshake <file.torrent> <ip:port>
-    python -m app.main download_piece -o <output> <file.torrent> <index>
-    python -m app.main download -o <output> <file.torrent>
-"""
+"""Command-line interface for the single-file BitTorrent v1 client."""
 
 from __future__ import annotations
 
@@ -23,7 +13,6 @@ from .tracker import PEER_ID, get_peers
 
 
 def _to_json(value):
-    """Make bencode output JSON-serializable (byte strings become text)."""
     if isinstance(value, bytes):
         try:
             return value.decode()
@@ -32,12 +21,18 @@ def _to_json(value):
     raise TypeError(f"Type not serializable: {type(value).__name__}")
 
 
+def _require_args(args: List[str], count: int, usage: str) -> None:
+    if len(args) != count:
+        raise SystemExit(f"Usage: python -m app.main {usage}")
+
+
 def cmd_decode(args: List[str]) -> None:
-    decoded = bencode.decode(args[0].encode())
-    print(json.dumps(decoded, default=_to_json))
+    _require_args(args, 1, "decode <bencoded-string>")
+    print(json.dumps(bencode.decode(args[0].encode()), default=_to_json))
 
 
 def cmd_info(args: List[str]) -> None:
+    _require_args(args, 1, "info <file.torrent>")
     torrent = Torrent.from_file(args[0])
     print(f"Tracker URL: {torrent.announce}")
     print(f"Length: {torrent.length}")
@@ -49,12 +44,14 @@ def cmd_info(args: List[str]) -> None:
 
 
 def cmd_peers(args: List[str]) -> None:
+    _require_args(args, 1, "peers <file.torrent>")
     torrent = Torrent.from_file(args[0])
     for peer in get_peers(torrent):
         print(peer)
 
 
 def cmd_handshake(args: List[str]) -> None:
+    _require_args(args, 2, "handshake <file.torrent> <ip:port>")
     torrent = Torrent.from_file(args[0])
     ip, port = args[1].rsplit(":", 1)
     with PeerConnection(ip, int(port), torrent.info_hash, PEER_ID) as conn:
@@ -64,8 +61,7 @@ def cmd_handshake(args: List[str]) -> None:
 def cmd_download_piece(args: List[str]) -> None:
     output, torrent_path, index = _parse_output_args(args, extra=1)
     torrent = Torrent.from_file(torrent_path)
-    peers = get_peers(torrent)
-    data = download.download_piece(torrent, peers, int(index[0]))
+    data = download.download_piece(torrent, get_peers(torrent), int(index[0]))
     with open(output, "wb") as handle:
         handle.write(data)
     print(f"Piece {index[0]} downloaded to {output}.")
@@ -74,19 +70,15 @@ def cmd_download_piece(args: List[str]) -> None:
 def cmd_download(args: List[str]) -> None:
     output, torrent_path, _ = _parse_output_args(args, extra=0)
     torrent = Torrent.from_file(torrent_path)
-    peers = get_peers(torrent)
-    download.download_file(torrent, peers, output)
+    download.download_file(torrent, get_peers(torrent), output)
     print(f"Downloaded {torrent_path} to {output}.")
 
 
 def _parse_output_args(args: List[str], extra: int):
-    """Parse ``-o <output> <torrent> [extra...]`` and return the parts."""
-    if not args or args[0] != "-o":
-        raise SystemExit("Expected: -o <output> <file.torrent> ...")
-    output = args[1]
-    torrent_path = args[2]
-    extras = args[3 : 3 + extra]
-    return output, torrent_path, extras
+    if len(args) != 3 + extra or args[0] != "-o" or not args[1]:
+        suffix = " <index>" if extra else ""
+        raise SystemExit(f"Usage: python -m app.main download{'_piece' if extra else ''} -o <output> <file.torrent>{suffix}")
+    return args[1], args[2], args[3:]
 
 
 COMMANDS = {
