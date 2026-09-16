@@ -1,4 +1,4 @@
-"""Parsing and modelling of ``.torrent`` metainfo files."""
+"""Parse and validate canonical single-file BitTorrent v1 metainfo."""
 
 from __future__ import annotations
 
@@ -8,12 +8,12 @@ from typing import List
 
 from . import bencode
 
-PIECE_HASH_LEN = 20  # Each piece hash is a raw SHA-1 digest.
+PIECE_HASH_LEN = 20
 
 
 @dataclass
 class Torrent:
-    """A parsed single-file ``.torrent`` and the values derived from it."""
+    """A parsed single-file torrent and its piece layout."""
 
     announce: str
     name: str
@@ -30,24 +30,38 @@ class Torrent:
     @classmethod
     def from_bytes(cls, raw: bytes) -> "Torrent":
         meta = bencode.decode(raw)
+        if not isinstance(meta, dict) or not isinstance(meta.get("info"), dict):
+            raise ValueError("Torrent must contain an info dictionary")
         info = meta["info"]
-
-        pieces = info["pieces"]
-        if len(pieces) % PIECE_HASH_LEN != 0:
-            raise ValueError("Corrupt torrent: 'pieces' is not a multiple of 20")
-        piece_hashes = [
-            pieces[i : i + PIECE_HASH_LEN]
-            for i in range(0, len(pieces), PIECE_HASH_LEN)
-        ]
-
+        if "files" in info or info.get("meta version") == 2:
+            raise ValueError("Only single-file BitTorrent v1 torrents are supported")
+        pieces = info.get("pieces")
+        length = info.get("length")
+        piece_length = info.get("piece length")
+        name = info.get("name")
+        announce = meta.get("announce")
+        if (not isinstance(pieces, bytes) or
+                not isinstance(length, int) or isinstance(length, bool) or length < 0 or
+                not isinstance(piece_length, int) or isinstance(piece_length, bool) or piece_length <= 0 or
+                not isinstance(name, bytes) or not isinstance(announce, bytes)):
+            raise ValueError("Invalid or missing single-file torrent fields")
+        if len(pieces) % PIECE_HASH_LEN:
+            raise ValueError("Corrupt torrent: piece hashes are not 20 bytes each")
+        expected_count = (length + piece_length - 1) // piece_length
+        if len(pieces) // PIECE_HASH_LEN != expected_count:
+            raise ValueError("Torrent piece count does not match file length")
+        try:
+            decoded_name = name.decode("utf-8")
+            decoded_announce = announce.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError("Torrent name or announce URL is not UTF-8") from error
         return cls(
-            announce=meta["announce"].decode(),
-            name=info["name"].decode(),
-            length=info["length"],
-            piece_length=info["piece length"],
-            piece_hashes=piece_hashes,
-            # The info hash is the SHA-1 of the bencoded `info` dict and is the
-            # torrent's canonical identifier on trackers and in handshakes.
+            announce=decoded_announce,
+            name=decoded_name,
+            length=length,
+            piece_length=piece_length,
+            piece_hashes=[pieces[i:i + PIECE_HASH_LEN]
+                          for i in range(0, len(pieces), PIECE_HASH_LEN)],
             info_hash=hashlib.sha1(bencode.encode(info)).digest(),
         )
 
@@ -56,7 +70,8 @@ class Torrent:
         return len(self.piece_hashes)
 
     def piece_size(self, index: int) -> int:
-        """Return the length of piece ``index`` (the last piece is shorter)."""
+        if index < 0 or index >= self.num_pieces:
+            raise IndexError(f"Piece index {index} is out of range")
         if index < self.num_pieces - 1:
             return self.piece_length
-        return self.length - self.piece_length * (self.num_pieces - 1)
+        return self.length - self.piece_length * index
