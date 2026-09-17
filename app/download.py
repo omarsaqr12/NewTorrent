@@ -1,71 +1,78 @@
-"""Download orchestration: single-piece and concurrent whole-file downloads."""
+"""Verified single-piece and concurrent whole-file download orchestration."""
 
 from __future__ import annotations
 
+import os
 import queue
+import tempfile
 import threading
+from pathlib import Path
 from typing import BinaryIO, List, Set
 
 from .peer import IntegrityError, PeerConnection
 from .torrent import Torrent
 from .tracker import PEER_ID, Peer
 
-MAX_WORKERS = 8  # Upper bound on simultaneous peer connections.
+MAX_WORKERS = 8
 
 
 def download_piece(torrent: Torrent, peers: List[Peer], index: int) -> bytes:
-    """Download and verify a single piece, trying peers until one succeeds."""
+    """Try advertised peers in order until one supplies a verified piece."""
+    length = torrent.piece_size(index)  # Reject invalid indices before connecting.
     last_error: Exception | None = None
     for peer in peers:
         try:
             with PeerConnection(peer.ip, peer.port, torrent.info_hash, PEER_ID) as conn:
                 conn.prepare_download()
-                return conn.download_piece(
-                    index, torrent.piece_size(index), torrent.piece_hashes[index]
-                )
+                return conn.download_piece(index, length, torrent.piece_hashes[index])
         except (OSError, IntegrityError, ConnectionError) as error:
             last_error = error
     raise RuntimeError(f"Could not download piece {index} from any peer: {last_error}")
 
 
 def download_file(torrent: Torrent, peers: List[Peer], output: str) -> None:
-    """Download the whole file concurrently across multiple peers.
+    """Download to a temporary sibling, publishing only on full verification.
 
-    Pieces are handed out from a shared work queue; one worker thread drives
-    each peer connection and writes verified pieces straight to their offset in
-    the output file. Any pieces left behind by failed peers are retried
-    sequentially so the result is always complete and correct.
+    An unsuccessful download removes its temporary file and leaves any existing
+    destination untouched. Replacement on success is atomic on the same volume.
     """
-    _preallocate(output, torrent.length)
-
-    work: "queue.Queue[int]" = queue.Queue()
-    for index in range(torrent.num_pieces):
-        work.put(index)
-
-    completed: Set[int] = set()
-    completed_lock = threading.Lock()
-    file_lock = threading.Lock()
-
-    with open(output, "r+b") as handle:
-        worker_peers = peers[:MAX_WORKERS]
-        threads = [
-            threading.Thread(
-                target=_worker,
-                args=(peer, torrent, work, handle, file_lock, completed, completed_lock),
-                daemon=True,
-            )
-            for peer in worker_peers
-        ]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-
-        # Safety net: any piece a failed peer dropped is retried sequentially.
-        missing = [i for i in range(torrent.num_pieces) if i not in completed]
-        for index in missing:
-            data = download_piece(torrent, peers, index)
-            _write_piece(handle, file_lock, torrent, index, data)
+    if torrent.num_pieces and not peers:
+        raise RuntimeError("Tracker returned no peers")
+    destination = Path(output)
+    fd, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".part",
+                                    dir=str(destination.parent))
+    os.close(fd)
+    try:
+        _preallocate(temporary, torrent.length)
+        work: "queue.Queue[int]" = queue.Queue()
+        for index in range(torrent.num_pieces):
+            work.put(index)
+        completed: Set[int] = set()
+        completed_lock = threading.Lock()
+        file_lock = threading.Lock()
+        with open(temporary, "r+b") as handle:
+            threads = [
+                threading.Thread(
+                    target=_worker,
+                    args=(peer, torrent, work, handle, file_lock, completed, completed_lock),
+                )
+                for peer in peers[:MAX_WORKERS]
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            # Workers may exit on unavailable peers or corrupt pieces. Retry all
+            # missing pieces; a failure aborts before the destination is replaced.
+            for index in range(torrent.num_pieces):
+                if index not in completed:
+                    data = download_piece(torrent, peers, index)
+                    _write_piece(handle, file_lock, torrent, index, data)
+            handle.flush()
+        os.replace(temporary, output)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def _worker(
@@ -78,30 +85,25 @@ def _worker(
     completed_lock: threading.Lock,
 ) -> None:
     try:
-        conn = PeerConnection(peer.ip, peer.port, torrent.info_hash, PEER_ID)
-        conn.connect()
-        conn.prepare_download()
-    except (OSError, ConnectionError):
-        return  # This peer is unusable; its pieces stay queued for others.
-
-    try:
-        while True:
-            try:
-                index = work.get_nowait()
-            except queue.Empty:
-                return
-            try:
-                data = conn.download_piece(
-                    index, torrent.piece_size(index), torrent.piece_hashes[index]
-                )
-            except (OSError, IntegrityError, ConnectionError):
-                work.put(index)  # Hand the piece back for another worker/fallback.
-                return
-            _write_piece(handle, file_lock, torrent, index, data)
-            with completed_lock:
-                completed.add(index)
-    finally:
-        conn.close()
+        with PeerConnection(peer.ip, peer.port, torrent.info_hash, PEER_ID) as conn:
+            conn.prepare_download()
+            while True:
+                try:
+                    index = work.get_nowait()
+                except queue.Empty:
+                    return
+                try:
+                    data = conn.download_piece(
+                        index, torrent.piece_size(index), torrent.piece_hashes[index]
+                    )
+                except (OSError, IntegrityError, ConnectionError):
+                    work.put(index)
+                    return
+                _write_piece(handle, file_lock, torrent, index, data)
+                with completed_lock:
+                    completed.add(index)
+    except (OSError, IntegrityError, ConnectionError):
+        return
 
 
 def _write_piece(
@@ -111,15 +113,13 @@ def _write_piece(
     index: int,
     data: bytes,
 ) -> None:
-    offset = index * torrent.piece_length
+    if len(data) != torrent.piece_size(index):
+        raise ValueError(f"Piece {index} has an unexpected byte count")
     with file_lock:
-        handle.seek(offset)
+        handle.seek(index * torrent.piece_length)
         handle.write(data)
 
 
 def _preallocate(path: str, size: int) -> None:
-    """Create ``path`` as a sparse file of ``size`` bytes for offset writes."""
     with open(path, "wb") as handle:
-        if size > 0:
-            handle.seek(size - 1)
-            handle.write(b"\x00")
+        handle.truncate(size)
