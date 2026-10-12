@@ -90,6 +90,19 @@ class SwarmTests(unittest.TestCase):
         with Storage(self.torrent, str(self.output)):
             pass  # kernel lock released on failure
 
+    def test_mixed_corruption_preserves_healthy_peer_retry_budget(self):
+        self.data = payload(65536)
+        self.torrent = Torrent.from_bytes(metainfo(self.data))
+        bad = self.peer(corrupt=True, delay=.02)
+        good = self.peer(delay=.025)
+        stats = self.run_download([bad.peer, good.peer], window=1, endgame=0,
+                                  max_retries=0)
+        self.assertGreater(stats.hash_failures, 0)
+        self.assertTrue(bad.requests)
+        self.assertTrue(good.requests)
+        self.assertFalse(any(failure['peer'] == str(good.peer)
+                             for failure in stats.peer_failures))
+
     def test_endgame_cancels_losing_requests(self):
         self.data = payload(65536)
         self.torrent = Torrent.from_bytes(metainfo(self.data))

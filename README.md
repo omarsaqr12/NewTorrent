@@ -71,7 +71,7 @@ python -m ruff check .
 python -m unittest discover -s tests -v
 ```
 
-The 51-test suite includes real loopback TCP peers and HTTP/UDP trackers, alongside
+The 53-test suite includes real loopback TCP peers and HTTP/UDP trackers, alongside
 parser, scheduler and generated layout tests. Fault scenarios cover complementary
 availability, peer churn, corruption, keepalive stalls, fragmented messages,
 cancellation, process termination, verified resume, path validation and disk errors.

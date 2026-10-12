@@ -10,7 +10,7 @@ python -m unittest discover -s tests -v
 python -m tools.swarm
 ```
 
-The local CPython 3.11.1 run on Windows passed all 51 tests, lint and compilation.
+The local CPython 3.11.1 run on Windows passed all 53 tests, lint and compilation.
 The installed CLI also passed help, decode and metainfo smoke checks. Peer discovery,
 handshake and piece-download commands are exercised as subprocesses against the
 local swarm. The demo verified 1,048,593 bytes from two complementary TCP peers.

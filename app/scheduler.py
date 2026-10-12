@@ -16,6 +16,7 @@ class PieceState:
     data: bytearray
     received: set[int] = field(default_factory=set)
     contributors: set[int] = field(default_factory=set)
+    source: int | None = None
 
 
 class Scheduler:
@@ -29,6 +30,7 @@ class Scheduler:
         self.availability = [0] * torrent.num_pieces
         self.peers: dict[int, set[int]] = {}
         self.active: dict[int, PieceState] = {}
+        self.isolated: set[int] = set()
         self.owners: dict[Block, set[int]] = {}
         self.pending = 0
         self.peak_pending = self.peak_active = 0
@@ -59,6 +61,12 @@ class Scheduler:
     def disconnect(self, peer: int) -> None:
         for block in list(self.owners):
             self.release(peer, block)
+        # A failed piece must be retried entirely from one source. Mixing a
+        # replacement peer into its partial retry would lose that attribution.
+        for index, state in list(self.active.items()):
+            if state.source == peer:
+                self.remaining += len(state.received)
+                del self.active[index]
         self.update(peer, set())
         self.peers.pop(peer, None)
 
@@ -85,9 +93,12 @@ class Scheduler:
                         continue
                     abandoned = self.active.pop(evictable)
                     self.remaining += len(abandoned.received)
-                state = PieceState(bytearray(self.torrent.piece_size(index)))
+                state = PieceState(bytearray(self.torrent.piece_size(index)),
+                                   source=peer if index in self.isolated else None)
                 self.active[index] = state
                 self.peak_active = max(self.peak_active, len(self.active))
+            if state.source is not None and state.source != peer:
+                continue
             for begin in range(0, len(state.data), BLOCK_SIZE):
                 if begin in state.received:
                     continue
@@ -128,5 +139,7 @@ class Scheduler:
         del self.active[index]
         if hashlib.sha1(state.data).digest() != self.torrent.piece_hashes[index]:
             self.remaining += len(state.received)
+            self.isolated.add(index)
             return losers, None, state.contributors
+        self.isolated.discard(index)
         return losers, state.data, set()

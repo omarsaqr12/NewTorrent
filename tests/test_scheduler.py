@@ -56,6 +56,20 @@ class SchedulerTests(unittest.TestCase):
         self.assertIsNone(data)
         self.assertEqual(suspects, {1, 2})
         self.assertEqual(scheduler.remaining, 2)
+        a = scheduler.request(1)
+        self.assertIsNone(scheduler.request(2))
+        scheduler.accept(1, a, payload(32768)[:a[2]])
+        scheduler.disconnect(1)
+        self.assertEqual(scheduler.remaining, 2)
+        for _ in range(2):
+            block = scheduler.request(2)
+            _, data, suspects = scheduler.accept(
+                2, block, payload(32768)[block[1]:block[1] + block[2]])
+        self.assertEqual(data, payload(32768))
+        self.assertEqual(suspects, set())
+        self.assertEqual(scheduler.pending, 0)
+        self.assertEqual(scheduler.remaining, 0)
+        self.assertFalse(scheduler.isolated)
 
     def test_codec_limits_and_unsafe_paths(self):
         with self.assertRaises(ValueError):

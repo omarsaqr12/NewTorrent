@@ -11,7 +11,7 @@ from app.peer import ProtocolError
 from app.storage import Storage
 from app.torrent import Torrent
 from app.tracker import Peer
-from tools.swarm import metainfo
+from tools.swarm import metainfo, payload as generated_payload
 
 
 class SessionTests(unittest.TestCase):
@@ -68,3 +68,39 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(self.engine.stats.verified_bytes, 4)
         with self.assertRaises(ProtocolError):
             self.engine._message(second, 7, struct.pack('>II', 999, 0) + b'evil', now)
+
+    def test_mixed_hash_failure_retries_without_dropping_healthy_contributor(self):
+        data = generated_payload(32768)
+        torrent = Torrent.from_bytes(metainfo(data, piece_length=32768))
+        with Storage(torrent, str(Path(self.directory.name) / 'mixed')) as storage:
+            engine = Engine(torrent, storage, [s.peer for s in self.sessions],
+                            options=Options(endgame=0, max_retries=0))
+            self.addCleanup(engine.selector.close)
+            engine.sessions = {s.id: s for s in self.sessions}
+            bad, good = self.sessions
+            for session in self.sessions:
+                engine.scheduler.update(session.id, {0})
+
+            def reply(session, corrupt=False):
+                block = engine.scheduler.request(session.id)
+                self.assertIsNotNone(block)
+                now = time.monotonic()
+                session.pending[block] = now
+                raw = bytes(block[2]) if corrupt else data[block[1]:block[1] + block[2]]
+                engine._message(session, 7, struct.pack('>II', *block[:2]) + raw, now)
+
+            reply(bad, corrupt=True)
+            reply(good)
+            self.assertEqual(engine.stats.hash_failures, 1)
+            self.assertEqual(set(engine.sessions), {bad.id, good.id})
+            self.assertEqual(engine.stats.retries, 0)
+            reply(bad, corrupt=True)
+            self.assertIsNone(engine.scheduler.request(good.id))
+            reply(bad, corrupt=True)
+            self.assertNotIn(bad.id, engine.sessions)
+            self.assertIn(good.id, engine.sessions)
+            reply(good)
+            reply(good)
+            self.assertEqual(storage.verified, {0})
+            self.assertEqual(engine.stats.verified_bytes, len(data))
+            self.assertEqual(engine.discovered[good.peer][0], 0)

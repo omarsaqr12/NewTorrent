@@ -37,9 +37,11 @@ owner. Choke or disconnect releases outstanding leases while retaining accepted
 blocks. Request expiry drops a stalled connection, releasing all its work. If
 active buffers are full, an unowned buffer with no connected source can be evicted;
 its lost blocks return to the remaining count. Corrupt complete buffers are reset.
-All contributors are recorded as suspects, without asserting which supplied bad
-data. Failures cause exponential cooldown and bounded attempts, not permanent bans.
-Counters and bounded per-peer failure reasons expose these decisions.
+Mixed-source corruption does not identify a faulty peer, so the failed piece is
+retried entirely from one source. A disconnect discards that retry's partial blocks
+to preserve attribution. A single-source hash failure causes exponential cooldown
+and bounded attempts; healthy contributors to mixed failures keep their retry
+budgets. Counters and bounded per-peer failure reasons expose these decisions.
 
 Endgame begins only below the configured remaining-block threshold **and** when
 every remaining block is already leased. At most two peers own a block. The first

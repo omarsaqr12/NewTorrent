@@ -16,6 +16,8 @@ determine the transport and storage bottlenecks.
 Recorded environment: CPython 3.11.1, Windows build 26200, eight logical CPUs,
 Intel family 6/model 140. Metadata in each dataset includes workload order, seeds,
 platform details and hashes of the measured reactor and scheduler source.
+The retained runs used [revision 273754b](https://github.com/omarsaqr12/NewTorrent/commit/273754b78979cb4440f1e98a336ae2334c924792),
+before single-source retries for corrupt pieces were added.
 
 ## Results
 

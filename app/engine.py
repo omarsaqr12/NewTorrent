@@ -226,12 +226,13 @@ class Engine:
                     self.stats.cancels += 1
             if corrupt:
                 self.stats.hash_failures += 1
-                # Suspicion, not proof. Drop contributors for bounded cooldown;
-                # never permanently ban ordinary failures or blame one mixed source.
-                for owner in corrupt:
-                    contributor = self.sessions.get(owner)
+                # Mixed-source failures cannot identify a faulty peer. The
+                # scheduler retries this piece from one source before applying
+                # a cooldown, preserving healthy contributors' retry budgets.
+                if len(corrupt) == 1:
+                    contributor = self.sessions.get(next(iter(corrupt)))
                     if contributor:
-                        self._drop(contributor, ConnectionError("Contributed to corrupt piece (uncertain attribution)"), now)
+                        self._drop(contributor, ConnectionError("Single-source piece failed hash verification"), now)
             if complete is not None:
                 try:
                     self.storage.commit(index, complete)
