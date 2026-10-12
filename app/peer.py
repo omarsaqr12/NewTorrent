@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import socket
 import struct
+import time
 from collections import deque
 
 PROTOCOL_STRING = b"BitTorrent protocol"
@@ -42,6 +43,10 @@ class PeerConnection:
         self.peer_id = peer_id
         self.sock: socket.socket | None = None
         self.remote_peer_id: bytes | None = None
+        self.num_pieces: int | None = None
+        self.available: set[int] = set()
+        self._first_message = True
+        self._deadline = time.monotonic() + 30
 
     def __enter__(self) -> "PeerConnection":
         self.connect()
@@ -51,6 +56,7 @@ class PeerConnection:
         self.close()
 
     def connect(self, timeout: float = 15.0) -> bytes:
+        self._deadline = time.monotonic() + timeout
         self.sock = socket.create_connection((self.ip, self.port), timeout=timeout)
         try:
             handshake = bytes([len(PROTOCOL_STRING)]) + PROTOCOL_STRING + RESERVED + self.info_hash + self.peer_id
@@ -73,14 +79,20 @@ class PeerConnection:
 
     def prepare_download(self) -> None:
         """Express interest and wait for unchoke; bitfield is optional (BEP 3)."""
+        self._deadline = time.monotonic() + 30
         self._send(MSG_INTERESTED)
         self._wait_for(MSG_UNCHOKE)
+
+    def wait_available(self, index: int) -> None:
+        while index not in self.available:
+            self._recv_message()
 
     def download_piece(
         self, index: int, length: int, expected_hash: bytes,
         pipeline_depth: int = PIPELINE_DEPTH,
     ) -> bytes:
-        if index < 0 or length <= 0 or len(expected_hash) != 20 or pipeline_depth < 1:
+        self._deadline = time.monotonic() + 30
+        if index < 0 or not 0 < length <= 16 * 1024 * 1024 or len(expected_hash) != 20 or pipeline_depth < 1:
             raise ValueError("Invalid piece index, size, hash, or pipeline depth")
         blocks = {
             begin: min(BLOCK_SIZE, length - begin)
@@ -142,6 +154,23 @@ class PeerConnection:
         if length > MAX_MESSAGE_SIZE:
             raise ProtocolError("Peer-wire message exceeds the size limit")
         body = self._recv_exact(length)
+        kind, payload = body[0], body[1:]
+        if kind in (0, 1, 2, 3) and payload:
+            raise ProtocolError("Invalid control message")
+        if kind == 4:
+            if len(payload) != 4:
+                raise ProtocolError("Invalid HAVE")
+            index = struct.unpack(">I", payload)[0]
+            if self.num_pieces is not None and index >= self.num_pieces:
+                raise ProtocolError("Invalid HAVE index")
+            self.available.add(index)
+        if kind == 5 and self.num_pieces is not None:
+            spare = (-self.num_pieces) % 8
+            if (not self._first_message or len(payload) != (self.num_pieces + 7) // 8
+                    or (spare and payload[-1] & ((1 << spare) - 1))):
+                raise ProtocolError("Invalid bitfield")
+            self.available = {i for i in range(self.num_pieces) if payload[i // 8] & (128 >> (i % 8))}
+        self._first_message = False
         return body[0], body[1:]
 
     def _wait_for(self, wanted_id: int) -> bytes:
@@ -155,6 +184,11 @@ class PeerConnection:
             raise ConnectionError("Peer is not connected")
         chunks = []
         while count > 0:
+            remaining = self._deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Peer operation deadline expired")
+            if hasattr(self.sock, "settimeout"):
+                self.sock.settimeout(remaining)
             chunk = self.sock.recv(count)
             if not chunk:
                 raise ConnectionError("Peer closed the connection unexpectedly")

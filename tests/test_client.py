@@ -1,8 +1,6 @@
 """Deterministic offline regression tests; no tracker or internet is contacted."""
 
 import hashlib
-import io
-import os
 import struct
 import tempfile
 import unittest
@@ -154,39 +152,21 @@ class DownloadTests(unittest.TestCase):
         self.peers = [Peer("127.0.0.1", 1234)]
 
     def test_publish_only_complete_file_and_preserve_existing_on_failure(self):
-        class OfflineConnection:
-            fail = False
-
-            def __init__(self, *args):
-                pass
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                pass
-
-            def prepare_download(self):
-                pass
-
-            def download_piece(self, index, *args):
-                if self.fail:
-                    raise ConnectionError("offline peer failure")
-                return [b"abcd", b"e"][index]
-
+        from tools.swarm import TCPPeer
+        from app.engine import Options
         with tempfile.TemporaryDirectory() as directory:
             dest = Path(directory) / "existing.bin"
             dest.write_bytes(b"ORIGINAL")
-            with patch("app.download.PeerConnection", OfflineConnection):
-                OfflineConnection.fail = True
-                with self.assertRaises(RuntimeError):
-                    download.download_file(self.torrent, self.peers, str(dest))
-                self.assertEqual(dest.read_bytes(), b"ORIGINAL")
-                self.assertEqual(list(Path(directory).iterdir()), [dest])
-                OfflineConnection.fail = False
+            with self.assertRaises(FileExistsError):
                 download.download_file(self.torrent, self.peers, str(dest))
-                self.assertEqual(dest.read_bytes(), b"abcde")
-                self.assertEqual(list(Path(directory).iterdir()), [dest])
+            with self.assertRaises(RuntimeError):
+                download.download_file(self.torrent, self.peers, str(dest), overwrite=True,
+                                       options=Options(no_progress_timeout=.15, max_retries=0))
+            self.assertEqual(dest.read_bytes(), b"ORIGINAL")
+            with TCPPeer(self.torrent, b"abcde") as peer:
+                download.download_file(self.torrent, [peer.peer], str(dest), overwrite=True)
+            self.assertEqual(dest.read_bytes(), b"abcde")
+            self.assertFalse(dest.with_name(dest.name + ".newtorrent").exists())
 
     def test_no_peers_does_not_touch_output(self):
         with tempfile.TemporaryDirectory() as directory:

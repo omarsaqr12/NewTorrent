@@ -1,125 +1,55 @@
-"""Verified single-piece and concurrent whole-file download orchestration."""
-
+"""Public download API: persistent verified storage and bounded peer reactor."""
 from __future__ import annotations
 
-import os
-import queue
-import tempfile
-import threading
 from pathlib import Path
-from typing import BinaryIO, List, Set
 
+from .engine import Engine, Options
 from .peer import IntegrityError, PeerConnection
+from .storage import Storage
 from .torrent import Torrent
-from .tracker import PEER_ID, Peer
-
-MAX_WORKERS = 8
+from .tracker import Announcer, Peer, TrackerService, new_peer_id
 
 
-def download_piece(torrent: Torrent, peers: List[Peer], index: int) -> bytes:
-    """Try advertised peers in order until one supplies a verified piece."""
-    length = torrent.piece_size(index)  # Reject invalid indices before connecting.
-    last_error: Exception | None = None
+def download_piece(torrent: Torrent, peers: list[Peer], index: int) -> bytes:
+    length = torrent.piece_size(index)
+    peer_id = new_peer_id()
+    last_error = None
     for peer in peers:
         try:
-            with PeerConnection(peer.ip, peer.port, torrent.info_hash, PEER_ID) as conn:
+            with PeerConnection(peer.ip, peer.port, torrent.info_hash, peer_id) as conn:
+                conn.num_pieces = torrent.num_pieces
                 conn.prepare_download()
+                conn.wait_available(index)
                 return conn.download_piece(index, length, torrent.piece_hashes[index])
         except (OSError, IntegrityError, ConnectionError) as error:
             last_error = error
-    raise RuntimeError(f"Could not download piece {index} from any peer: {last_error}")
+    raise RuntimeError(f"Could not download piece {index}: {last_error}")
 
 
-def download_file(torrent: Torrent, peers: List[Peer], output: str) -> None:
-    """Download to a temporary sibling, publishing only on full verification.
-
-    An unsuccessful download removes its temporary file and leaves any existing
-    destination untouched. Replacement on success is atomic on the same volume.
-    """
-    if torrent.num_pieces and not peers:
-        raise RuntimeError("Tracker returned no peers")
-    destination = Path(output)
-    fd, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".part",
-                                    dir=str(destination.parent))
-    os.close(fd)
-    try:
-        _preallocate(temporary, torrent.length)
-        work: "queue.Queue[int]" = queue.Queue()
-        for index in range(torrent.num_pieces):
-            work.put(index)
-        completed: Set[int] = set()
-        completed_lock = threading.Lock()
-        file_lock = threading.Lock()
-        with open(temporary, "r+b") as handle:
-            threads = [
-                threading.Thread(
-                    target=_worker,
-                    args=(peer, torrent, work, handle, file_lock, completed, completed_lock),
-                )
-                for peer in peers[:MAX_WORKERS]
-            ]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join()
-            # Workers may exit on unavailable peers or corrupt pieces. Retry all
-            # missing pieces; a failure aborts before the destination is replaced.
-            for index in range(torrent.num_pieces):
-                if index not in completed:
-                    data = download_piece(torrent, peers, index)
-                    _write_piece(handle, file_lock, torrent, index, data)
-            handle.flush()
-        os.replace(temporary, output)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
-
-
-def _worker(
-    peer: Peer,
-    torrent: Torrent,
-    work: "queue.Queue[int]",
-    handle: BinaryIO,
-    file_lock: threading.Lock,
-    completed: Set[int],
-    completed_lock: threading.Lock,
-) -> None:
-    try:
-        with PeerConnection(peer.ip, peer.port, torrent.info_hash, PEER_ID) as conn:
-            conn.prepare_download()
-            while True:
-                try:
-                    index = work.get_nowait()
-                except queue.Empty:
-                    return
-                try:
-                    data = conn.download_piece(
-                        index, torrent.piece_size(index), torrent.piece_hashes[index]
-                    )
-                except (OSError, IntegrityError, ConnectionError):
-                    work.put(index)
-                    return
-                _write_piece(handle, file_lock, torrent, index, data)
-                with completed_lock:
-                    completed.add(index)
-    except (OSError, IntegrityError, ConnectionError):
-        return
-
-
-def _write_piece(
-    handle: BinaryIO,
-    file_lock: threading.Lock,
-    torrent: Torrent,
-    index: int,
-    data: bytes,
-) -> None:
-    if len(data) != torrent.piece_size(index):
-        raise ValueError(f"Piece {index} has an unexpected byte count")
-    with file_lock:
-        handle.seek(index * torrent.piece_length)
-        handle.write(data)
-
-
-def _preallocate(path: str, size: int) -> None:
-    with open(path, "wb") as handle:
-        handle.truncate(size)
+def download_file(torrent: Torrent, peers: list[Peer] | None, output: str, *,
+                  options: Options | None = None, resume: bool = True,
+                  overwrite: bool = False, stop=None, progress=None,
+                  tracker_timeout: float = 5):
+    options = options or Options()
+    options.validate(torrent)
+    if peers == [] and torrent.num_pieces and not Path(output + '.newtorrent').exists():
+        raise RuntimeError("No peers supplied")
+    with Storage(torrent, output, resume=resume, overwrite=overwrite, stop=stop) as storage:
+        service = None
+        peer_id = new_peer_id()
+        if peers is None and len(storage.verified) != torrent.num_pieces:
+            service = TrackerService(Announcer(torrent, peer_id=peer_id,
+                                               timeout=tracker_timeout, limit=options.max_discovery,
+                                               stop=stop),
+                                     left=torrent.length - sum(torrent.piece_size(i) for i in storage.verified))
+            peers = service.take_peers()
+        engine = Engine(torrent, storage, peers or [], options=options, peer_id=peer_id,
+                        stop=stop, progress=progress, tracker=service)
+        completed = False
+        try:
+            result = engine.run()
+            completed = True
+            return result
+        finally:
+            if service:
+                service.close(engine.stats, completed)

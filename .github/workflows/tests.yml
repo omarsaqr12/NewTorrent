@@ -1,25 +1,26 @@
-name: Python regression tests
-
-on:
-  push:
-  pull_request:
-
+name: Offline regression and real-socket swarm
+on: [push, pull_request]
 jobs:
   tests:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, python: '3.10'}
+          - {os: ubuntu-latest, python: '3.12'}
+          - {os: ubuntu-latest, python: '3.13'}
+          - {os: windows-latest, python: '3.11'}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-      - name: Install client dependencies
-        run: python -m pip install -r requirements.txt
-      - name: Compile Python sources
-        run: python -m compileall -q app benchmark.py tests
-      - name: Run documented offline quickstart
-        run: |
-          python -m app.main info sample.torrent
-          test "$(python -m app.main decode 'd3:foo3:bare')" = '{"foo": "bar"}'
-      - name: Run offline protocol and download regression tests
-        run: python -m unittest discover -s tests -v
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m ruff check .
+      - run: python -m compileall -q app tools tests benchmark.py
+      - run: newtorrent info sample.torrent
+      - run: newtorrent decode d3:foo3:bare
+      - run: python -m unittest discover -s tests -v
+      - run: python -m tools.swarm

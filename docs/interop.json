@@ -1,0 +1,27 @@
+{
+  "python": "3.11.1",
+  "platform": "Windows-10-10.0.26200-SP0",
+  "command": "python -m tools.interop",
+  "size_bytes": 1048593,
+  "configuration": "IPv4 loopback TCP, DHT/LSD/UPnP/NAT-PMP off, no tracker discovery",
+  "client": "libtorrent 2.1.1.0",
+  "status": "verified",
+  "stats": {
+    "downloaded_bytes": 1048593,
+    "duplicate_bytes": 0,
+    "requested_bytes": 1048593,
+    "verified_bytes": 1048593,
+    "resumed_bytes": 0,
+    "retries": 0,
+    "hash_failures": 0,
+    "protocol_errors": 0,
+    "timeouts": 0,
+    "cancels": 0,
+    "peak_peers": 1,
+    "peak_pending": 5,
+    "peak_active": 3,
+    "elapsed_seconds": 0.2180000000007567,
+    "revalidation_seconds": 0.0,
+    "peer_failures": []
+  }
+}

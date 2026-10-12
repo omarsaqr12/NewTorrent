@@ -1,0 +1,40 @@
+[
+  {
+    "experiment": "peers",
+    "size_bytes": 67108864,
+    "config": "four",
+    "successes": 5,
+    "trials": 5,
+    "median_wall": 5.399778500002867,
+    "min_wall": 5.142722700002196,
+    "max_wall": 7.223523599997861,
+    "median_requested_bytes": 67108864,
+    "median_duplicate_bytes": 0,
+    "median_resumed_bytes": 0,
+    "median_revalidation_seconds": 0.0,
+    "median_peak_rss_bytes": 161873920,
+    "median_cpu_seconds": 3.328125,
+    "median_goodput_bytes_second": 12428077.188715125,
+    "median_peak_pending": 20,
+    "median_peak_active": 4
+  },
+  {
+    "experiment": "peers",
+    "size_bytes": 67108864,
+    "config": "one",
+    "successes": 5,
+    "trials": 5,
+    "median_wall": 15.72189570000046,
+    "min_wall": 15.547861399994872,
+    "max_wall": 18.706863599996723,
+    "median_requested_bytes": 67108864,
+    "median_duplicate_bytes": 0,
+    "median_resumed_bytes": 0,
+    "median_revalidation_seconds": 0.0,
+    "median_peak_rss_bytes": 161636352,
+    "median_cpu_seconds": 3.25,
+    "median_goodput_bytes_second": 4268496.959943453,
+    "median_peak_pending": 5,
+    "median_peak_active": 2
+  }
+]

@@ -7,20 +7,25 @@ from typing import Tuple, Union
 Bencodable = Union[int, bytes, str, list, dict]
 
 
-def decode(data: bytes) -> Bencodable:
+def decode(data: bytes, *, max_size: int = 8 * 1024 * 1024,
+           max_depth: int = 64) -> Bencodable:
     """Decode a complete bencoded value, rejecting malformed or trailing data.
 
     Values remain bytes; dictionary keys are decoded as UTF-8 strings for the
     client-facing torrent/tracker APIs. Noncanonical encodings are rejected so
     re-encoding a parsed info dictionary cannot silently change its info hash.
     """
-    value, end = _decode_at(data, 0)
+    if len(data) > max_size:
+        raise ValueError("Bencode input exceeds size limit")
+    value, end = _decode_at(data, 0, 0, max_depth)
     if end != len(data):
         raise ValueError("Trailing data after top-level bencode value")
     return value
 
 
-def _decode_at(data: bytes, index: int) -> Tuple[Bencodable, int]:
+def _decode_at(data: bytes, index: int, depth: int, max_depth: int) -> Tuple[Bencodable, int]:
+    if depth > max_depth:
+        raise ValueError("Bencode nesting exceeds depth limit")
     if index >= len(data):
         raise ValueError("Truncated bencode value")
     prefix = data[index]
@@ -59,7 +64,7 @@ def _decode_at(data: bytes, index: int) -> Tuple[Bencodable, int]:
                 raise ValueError("Unterminated bencode list")
             if data[index] == ord("e"):
                 return items, index + 1
-            item, index = _decode_at(data, index)
+            item, index = _decode_at(data, index, depth + 1, max_depth)
             items.append(item)
 
     if prefix == ord("d"):
@@ -71,11 +76,11 @@ def _decode_at(data: bytes, index: int) -> Tuple[Bencodable, int]:
                 raise ValueError("Unterminated bencode dictionary")
             if data[index] == ord("e"):
                 return result, index + 1
-            key, index = _decode_at(data, index)
+            key, index = _decode_at(data, index, depth + 1, max_depth)
             if not isinstance(key, bytes) or (previous_key is not None and key <= previous_key):
                 raise ValueError("Dictionary keys must be unique, sorted byte strings")
             previous_key = key
-            value, index = _decode_at(data, index)
+            value, index = _decode_at(data, index, depth + 1, max_depth)
             try:
                 result[key.decode("utf-8")] = value
             except UnicodeDecodeError as error:

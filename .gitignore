@@ -8,6 +8,9 @@ dist/
 
 # Virtual environments
 .venv/
+.validation-venv/
+.validation/
+*.prof
 venv/
 env/
 
@@ -21,3 +24,7 @@ output*
 .idea/
 .DS_Store
 Thumbs.db
+.hypothesis/
+.ruff_cache/
+*.newtorrent/
+*.newtorrent.lock
