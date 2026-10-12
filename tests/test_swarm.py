@@ -116,12 +116,16 @@ class SwarmTests(unittest.TestCase):
     def test_cooperative_interruption_resume_and_checkpoint_corruption(self):
         peer = self.peer(delay=.02)
         stop = threading.Event()
-        def progress(stats, _):
-            if stats.verified_bytes:
-                stop.set()
-        with self.assertRaises(InterruptedError):
-            download_file(self.torrent, [peer.peer], str(self.output), options=fast_options(window=1),
-                          stop=stop, progress=progress)
+        commit = Storage.commit
+        def interrupt_after_commit(storage, index, data):
+            commit(storage, index, data)
+            stop.set()
+        # Interrupt at a durable checkpoint rather than waiting for the timed
+        # progress display, which may refresh after a fast transfer finishes.
+        with patch.object(Storage, 'commit', interrupt_after_commit):
+            with self.assertRaises(InterruptedError):
+                download_file(self.torrent, [peer.peer], str(self.output),
+                              options=fast_options(window=1), stop=stop)
         stage = Path(str(self.output) + '.newtorrent')
         (stage / 'checkpoint.json').write_text('{truncated')
         before = len(peer.requests)
